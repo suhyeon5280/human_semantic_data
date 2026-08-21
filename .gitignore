@@ -24,3 +24,10 @@ data/synth_preview/
 #   human_assets.json       : synth_assets.py 생성물
 #   episode_ground_fit.json : synth_calibrate.py 생성물 (머신/에피소드 종속)
 data/
+
+# ── 루트에 생긴 데이터셋 산출물 (data/ 밖에 만든 경우) ──
+/omnivla_dataset*/
+/synth_dataset*/
+/quality_check/
+/synth_for_gpu*/
+*.zip

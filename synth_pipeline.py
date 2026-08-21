@@ -100,6 +100,8 @@ def main() -> None:
     ap.add_argument("--layout", choices=["episode", "minisequence"], default="episode")
     ap.add_argument("--context", choices=["real", "repeat"], default="real",
                     help="step2b의 obs 컨텍스트 구성 방식")
+    ap.add_argument("--goal-mode", choices=["square", "pad", "bbox"], default="square",
+                    help="step2b의 goal 이미지 구성 (square 권장)")
     ap.add_argument("--force-assets", action="store_true",
                     help="H_real을 다시 뽑는다 (기존 GT와 어긋나므로 재합성 필요)")
     ap.add_argument("--dry-run", action="store_true", help="실행할 단계만 출력")
@@ -146,7 +148,8 @@ def main() -> None:
                      "--frame-gap", str(args.frame_gap), "--seed", str(args.seed),
                      "--quiet", "--out", synth_dir], "4/6 합성 + GT"),
         "nomad": (["step2b_nomad_synth_engine.py", "--synth-dir", synth_dir,
-                   "--episodes-dir", eps_dir, "--context", args.context],
+                   "--episodes-dir", eps_dir, "--context", args.context,
+                   "--goal-mode", args.goal_mode],
                   "5/6 NoMaD 궤적 [GPU]"),
         "package": (["synth_package.py", "--synth-dir", synth_dir,
                      "--episodes-dir", eps_dir, "--out", args.out,

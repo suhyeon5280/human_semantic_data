@@ -82,6 +82,52 @@ def _center_crop_and_resize(img_rgb: np.ndarray, size: int = 96) -> np.ndarray:
     return cv2.resize(cropped, (size, size), interpolation=cv2.INTER_AREA)
 
 
+def make_goal(rgb, bbox, mode: str = "square", margin: float = 1.35):
+    """NoMaD에 줄 goal 이미지를 만든다.
+
+    왜 필요한가: 원래 step2는 bbox를 그대로 잘라 _center_crop_and_resize에 넘겼다.
+    그런데 사람 bbox는 세로로 길어서(예: 45x163) 4:3을 맞추는 과정에서 위아래가
+    잘려나가고 **가운데 23%(중앙값)만 남는다.** 결과물은 바지/상의 클로즈업이라
+    머리도 다리도 지면도 없다. 거리와 방향을 읽을 단서가 사라지므로 goal 조건이
+    사실상 무력화된다 (궤적이 전방 1m 직선으로 붕괴).
+
+    mode="square" : 사람을 중심으로 정사각 영역을 원본 프레임에서 잘라낸다.
+                    주변 지면과 배경이 함께 들어가 NoMaD가 학습 때 본 "카메라 뷰"에
+                    가깝다. margin은 bbox 대비 여유 배율.
+    mode="pad"    : 사람 전체를 비율 유지로 축소하고 남는 곳을 회색으로 채운다.
+                    사람은 온전하지만 배경 단서는 없다.
+    mode="bbox"   : 기존(원본 step2) 동작. 비교용으로 남겨둔다.
+    """
+    H, W = rgb.shape[:2]
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(W - 1, x2), min(H - 1, y2)
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    if mode == "bbox":
+        return rgb[y1:y2 + 1, x1:x2 + 1]
+
+    if mode == "pad":
+        crop = rgb[y1:y2 + 1, x1:x2 + 1]
+        h, w = crop.shape[:2]
+        side = max(h, w)
+        canvas = np.full((side, side, 3), 128, np.uint8)
+        oy, ox = (side - h) // 2, (side - w) // 2
+        canvas[oy:oy + h, ox:ox + w] = crop
+        return canvas
+
+    # mode == "square": 사람 중심 정사각 + 주변 맥락
+    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    side = max(x2 - x1, y2 - y1) * margin
+    side = min(side, min(H, W))                  # 프레임을 벗어나지 않게
+    half = side / 2.0
+    sx = int(round(min(max(cx - half, 0), W - side)))
+    sy = int(round(min(max(cy - half, 0), H - side)))
+    e = int(round(side))
+    return rgb[sy:sy + e, sx:sx + e]
+
+
 def _ego_action_to_nomad_traj_norm(best_traj: np.ndarray) -> np.ndarray:
     """(8,2) 궤적 -> OmniVLA `nomad_traj_norm` (8,4) = (x, y, cos, sin).
 
@@ -257,6 +303,11 @@ def main() -> None:
     ap.add_argument("--nomad-ckpt", default="models/nomad_vla_checkpoint.pth")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--context", choices=["real", "repeat"], default="real")
+    ap.add_argument("--goal-mode", choices=["square", "pad", "bbox"], default="square",
+                    help="goal 이미지 구성. square=사람 중심 정사각(권장), "
+                         "pad=비율유지+패딩, bbox=기존 step2 동작(가운데 23%%만 남음)")
+    ap.add_argument("--goal-margin", type=float, default=1.35,
+                    help="square 모드에서 bbox 대비 여유 배율")
     ap.add_argument("--dist-threshold", type=float, default=DIST_THRESHOLD_NORM,
                     help="NoMaD 궤적이 이만큼(정규화 단위) 안으로 못 들어오면 그 사람은 "
                          "obj_detect=False로 표시. 0을 주면 필터를 끄고 전부 채운다.")
@@ -274,6 +325,8 @@ def main() -> None:
     engine = NomadSynthEngine(args.nomad_yaml, args.nomad_ckpt, args.device)
     print(f"---> 컨텍스트 모드: {args.context} "
           f"({'원본 에피소드 직전 프레임' if args.context == 'real' else '현재 프레임 반복'})")
+    print(f"---> goal 모드: {args.goal_mode}"
+          + (f" (margin {args.goal_margin})" if args.goal_mode == "square" else ""))
 
     stat = {"samples": 0, "skipped": 0, "negative": 0,
             "people": 0, "matched": 0, "too_far": 0}
@@ -310,9 +363,8 @@ def main() -> None:
                 continue
             stat["people"] += 1
 
-            x1, y1, x2, y2 = person["bbox_xyxy"]
-            goal = rgb[max(0, y1):y2 + 1, max(0, x1):x2 + 1]
-            if goal.size == 0:
+            goal = make_goal(rgb, person["bbox_xyxy"], args.goal_mode, args.goal_margin)
+            if goal is None or goal.size == 0:
                 continue
 
             traj, min_d, matched_idx = engine.sample_trajectory(
@@ -329,6 +381,7 @@ def main() -> None:
             o["obj_detect"] = bool(reachable)
             o["needs_nomad_traj"] = False
             o["nomad_context_mode"] = args.context
+            o["nomad_goal_mode"] = args.goal_mode
 
             stat["matched" if reachable else "too_far"] += 1
 
