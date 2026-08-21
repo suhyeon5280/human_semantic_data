@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# ── 공개 데이터셋 원본 (FrodoBots-2K 주행 프레임 + Metric3D depth), 709MB ──
+# 재취득 가능하고 depth는 step1_metric3d_engine.py로 재생성된다.
+data/episodes/
+
+# ── 파이프라인 생성물 ──
+# synth_compose.py의 --seed와 data/human_assets.json이 고정이므로 동일하게 재생성된다.
+# (README 10절 재현성 참조)
+# data/synth_dataset   264MB
+# data/omnivla_dataset  13MB
+# data/synth_preview    초기 검수용, 폐기 가능
+data/synth_dataset/
+data/omnivla_dataset/
+data/synth_preview/
+
+# ── data/ 전체 ──
+# 저장소는 "데이터셋을 정제된 학습 데이터로 바꾸는 코드"만 담는다.
+# 에셋/주석/생성물은 데이터셋 쪽에서 따로 관리한다.
+#   human/, human_cropped/  : 사람 PNG 에셋 (31MB)
+#   human_annotations.jsonl : 에셋 캡션 (수작업)
+#   human_assets.json       : synth_assets.py 생성물
+#   episode_ground_fit.json : synth_calibrate.py 생성물 (머신/에피소드 종속)
+data/
