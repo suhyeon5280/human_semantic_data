@@ -130,7 +130,13 @@ find data/episodes -name '*.npy' | wc -l          # 0   (안 옮겨도 된다)
 ### 2-3. GPU 머신: NoMaD 궤적 채우기
 
 > **이 저장소만으로는 실행되지 않는다.** `step2b`는 NoMaD 본체를 import하는데,
-> 그 코드와 체크포인트는 원본 `LeLaN_Data` 저장소에 있다. 필요한 것:
+> 그 코드와 체크포인트는 원본 `LeLaN_Data` 저장소에 있다. 둘 중 하나를 하면 된다.
+>
+> - **(A)** 아래 항목들을 이 저장소 폴더 안으로 복사한다 → 여기서 바로 실행
+> - **(B)** `step2b_nomad_synth_engine.py`를 `LeLaN_Data` 안으로 복사한다 → 거기서 실행
+>
+> `step2b`는 자기 파일이 있는 디렉토리를 `sys.path`에 넣으므로 둘 다 동작한다.
+> 필요한 것:
 >
 > | 필요 | 위치 |
 > |---|---|
@@ -142,9 +148,18 @@ find data/episodes -name '*.npy' | wc -l          # 0   (안 옮겨도 된다)
 >
 > SAM 체크포인트(273MB)는 **필요 없다** — `step2b`는 SAM을 로드하지 않는다.
 
-`step2b`는 자기 파일이 있는 디렉토리를 `sys.path`에 넣는다
-(`base_path = Path(__file__).resolve().parent`). 그래서 **스크립트를 `LeLaN_Data`
-안에 두고 거기서 실행하면** `vint_train`, `models/`, `data_config.yaml`을 알아서 찾는다.
+(A)로 하면 `vint_train/`, `diffusion_policy/`, `models/`를 이 폴더에 두고, 파이썬 환경만
+`LeLaN_Data`에서 쓰던 것을 활성화하면 된다.
+
+```bash
+source ~/lelan_env/bin/activate     # LeLaN_Data를 돌리던 환경
+cp -r ~/LeLaN_Data/vint_train ~/LeLaN_Data/models .
+```
+
+**환경 주의:** 구버전 `diffusers`가 최신 `huggingface_hub`과 충돌해
+`ImportError: cannot import name 'HfFolder'`가 날 수 있다. 그때는
+`pip install "huggingface_hub==0.25.2"`로 되돌린다 (`diffusers`를 그대로 두면
+기존 데이터와 같은 스케줄러 코드가 유지된다).
 
 아래 명령은 **전부 GPU 머신에서** 실행한다 (노트북에서는 돌지 않는다).
 

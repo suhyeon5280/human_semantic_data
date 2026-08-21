@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """합성 보행자 데이터셋 전체 파이프라인 — 한 번에 실행.
 
-    python3 synth_pipeline.py --all --num 600
-    python3 synth_pipeline.py --stage compose,package        # 일부만
-    python3 synth_pipeline.py --all --skip-gpu               # GPU 없는 머신에서
+    python3 synth_pipeline.py --all --num 600                # 처음부터 전부
+    python3 synth_pipeline.py --all --skip-gpu                # GPU 없는 머신 (합성까지만)
+
+    # GPU 머신: 옮겨온 합성 데이터로 궤적 채우고 학습 폴더까지 한 번에
+    python3 synth_pipeline.py --stage nomad,package \
+        --synth-dir synth_for_gpu/synth_dataset \
+        --episodes-dir synth_for_gpu/episodes \
+        --out data/omnivla_dataset
 
 단계
 ----
@@ -66,11 +71,11 @@ def run(cmd: list[str], desc: str) -> bool:
     return ok
 
 
-def episodes_missing_depth() -> list[str]:
-    if not EPISODES_DIR.exists():
+def episodes_missing_depth(eps_dir: Path = EPISODES_DIR) -> list[str]:
+    if not eps_dir.exists():
         return []
     missing = []
-    for ep in sorted(d for d in EPISODES_DIR.iterdir() if d.is_dir()):
+    for ep in sorted(d for d in eps_dir.iterdir() if d.is_dir()):
         n_img = len(list(ep.glob("*.jpg")))
         n_depth = len(list((ep / "metric_depth").glob("*_depth.npy")))
         if n_img and n_depth < n_img:
@@ -87,7 +92,11 @@ def main() -> None:
     ap.add_argument("--num", type=int, default=600, help="합성할 샘플 수 상한")
     ap.add_argument("--frame-gap", type=int, default=3)
     ap.add_argument("--seed", type=int, default=2026)
-    ap.add_argument("--out", default="data/omnivla_synth_dataset", help="패키징 출력 루트")
+    ap.add_argument("--out", default="data/omnivla_dataset", help="패키징 출력 루트")
+    ap.add_argument("--synth-dir", default=str(SYNTH_DIR),
+                    help="합성 결과 위치. 다른 머신에서 압축 풀었으면 그 경로를 준다")
+    ap.add_argument("--episodes-dir", default=str(EPISODES_DIR),
+                    help="원본 주행 프레임 위치 (nomad --context real 에 필요)")
     ap.add_argument("--layout", choices=["episode", "minisequence"], default="episode")
     ap.add_argument("--context", choices=["real", "repeat"], default="real",
                     help="step2b의 obs 컨텍스트 구성 방식")
@@ -111,7 +120,7 @@ def main() -> None:
 
     # depth 단계는 정말 필요할 때만
     if "depth" in stages:
-        missing = episodes_missing_depth()
+        missing = episodes_missing_depth(Path(args.episodes_dir))
         if missing:
             print(f"[INFO] metric_depth가 없는 에피소드 {len(missing)}개: {missing}")
         else:
@@ -127,6 +136,7 @@ def main() -> None:
     if args.dry_run:
         return
 
+    synth_dir, eps_dir = args.synth_dir, args.episodes_dir
     cmds = {
         "depth": (["step1_metric3d_engine.py"], "1/6 Metric3D depth [GPU]"),
         "calibrate": (["synth_calibrate.py"], "2/6 지면 평면 피팅"),
@@ -134,13 +144,14 @@ def main() -> None:
                    "3/6 에셋 H_real 부여"),
         "compose": (["synth_compose.py", "--num", str(args.num),
                      "--frame-gap", str(args.frame_gap), "--seed", str(args.seed),
-                     "--quiet", "--out", str(SYNTH_DIR)], "4/6 합성 + GT"),
-        "nomad": (["step2b_nomad_synth_engine.py", "--synth-dir", str(SYNTH_DIR),
-                   "--episodes-dir", str(EPISODES_DIR), "--context", args.context],
+                     "--quiet", "--out", synth_dir], "4/6 합성 + GT"),
+        "nomad": (["step2b_nomad_synth_engine.py", "--synth-dir", synth_dir,
+                   "--episodes-dir", eps_dir, "--context", args.context],
                   "5/6 NoMaD 궤적 [GPU]"),
-        "package": (["synth_package.py", "--synth-dir", str(SYNTH_DIR),
-                     "--episodes-dir", str(EPISODES_DIR), "--out", args.out,
-                     "--layout", args.layout], "6/6 OmniVLA 패키징"),
+        "package": (["synth_package.py", "--synth-dir", synth_dir,
+                     "--episodes-dir", eps_dir, "--out", args.out,
+                     "--layout", args.layout, "--require-traj"],
+                    "6/6 OmniVLA 패키징"),
     }
 
     t0 = time.time()
@@ -151,14 +162,15 @@ def main() -> None:
             sys.exit(1)
 
     print(f"\n{'=' * 66}\n[전체 완료] {time.time() - t0:.1f}초")
-    if SYNTH_DIR.exists():
-        n = len(list(SYNTH_DIR.glob("*_gt.json")))
-        print(f"  합성 샘플     : {n}개  ({SYNTH_DIR})")
+    sd = Path(args.synth_dir)
+    if sd.exists():
+        n = len(list(sd.glob("*_gt.json")))
+        print(f"  합성 샘플     : {n}개  ({sd})")
     if Path(args.out).exists():
         print(f"  학습용 패키지 : {Path(args.out).resolve()}")
 
     # nomad를 건너뛰었다면 반드시 알려준다 — 이 상태로는 학습이 안 된다
-    pkls = sorted(SYNTH_DIR.glob("*.pkl")) if SYNTH_DIR.exists() else []
+    pkls = sorted(sd.glob("*.pkl")) if sd.exists() else []
     if pkls and "nomad" not in stages:
         import pickle
         pending = sum(1 for p in pkls[:50]
