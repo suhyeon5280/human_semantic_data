@@ -129,18 +129,50 @@ find data/episodes -name '*.npy' | wc -l          # 0   (안 옮겨도 된다)
 
 ### 2-3. GPU 머신: NoMaD 궤적 채우기
 
-모델 체크포인트가 있어야 한다.
+> **이 저장소만으로는 실행되지 않는다.** `step2b`는 NoMaD 본체를 import하는데,
+> 그 코드와 체크포인트는 원본 `LeLaN_Data` 저장소에 있다. 필요한 것:
+>
+> | 필요 | 위치 |
+> |---|---|
+> | `vint_train/` 패키지 | `LeLaN_Data/vint_train/` |
+> | `models/nomad.yaml` | `LeLaN_Data/models/` |
+> | `models/nomad_vla_checkpoint.pth` (73MB) | `LeLaN_Data/models/` |
+> | `vint_train/data/data_config.yaml` (action_stats) | `LeLaN_Data/vint_train/data/` |
+> | `diffusers`, `diffusion_policy` | pip 설치 |
+>
+> SAM 체크포인트(273MB)는 **필요 없다** — `step2b`는 SAM을 로드하지 않는다.
 
-```
-models/nomad.yaml
-models/nomad_vla_checkpoint.pth
-```
+`step2b`는 자기 파일이 있는 디렉토리를 `sys.path`에 넣는다
+(`base_path = Path(__file__).resolve().parent`). 그래서 **스크립트를 `LeLaN_Data`
+안에 두고 거기서 실행하면** `vint_train`, `models/`, `data_config.yaml`을 알아서 찾는다.
 
-SAM 체크포인트는 **필요 없다** (`step2b`는 SAM을 로드하지 않는다).
+아래 명령은 **전부 GPU 머신에서** 실행한다 (노트북에서는 돌지 않는다).
 
 ```bash
-# 먼저 50개로 동작 확인
-python3 step2b_nomad_synth_engine.py --limit 50 --context real
+cd ~/LeLaN_Data
+cp ~/human_semantic_data/step2b_nomad_synth_engine.py .     # 또는 심볼릭 링크
+
+# 의존성 확인 (GPU 머신)
+python3 -c "import torch, diffusers; from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D; print('OK', torch.cuda.is_available())"
+```
+
+`OK True`가 나와야 한다. `False`면 그 머신이 CUDA를 못 잡은 것이다.
+
+```bash
+# 1) 스모크 테스트 — 모델이 뜨고 궤적이 나오는지만 본다
+python3 step2b_nomad_synth_engine.py \
+  --synth-dir ~/LeLaN_Data_plus/data/synth_dataset \
+  --episodes-dir ~/LeLaN_Data_plus/data/episodes \
+  --limit 5
+```
+
+`load_state_dict missing=0, unexpected=0`이 아니면 모델 구조와 체크포인트가
+어긋난 것이니 여기서 멈춰야 한다.
+
+```bash
+# 2) 컨텍스트 방식 비교 — min_dist 중앙값이 낮은 쪽을 택한다
+python3 step2b_nomad_synth_engine.py --synth-dir ... --limit 50 --context real
+python3 step2b_nomad_synth_engine.py --synth-dir ... --limit 50 --context repeat
 ```
 
 마지막 요약에서 이걸 본다:
@@ -150,18 +182,31 @@ min_dist 분포 : median 6.2, p90 11.4, max 18.0  (임계 10.0)
 ```
 
 - 중앙값이 10보다 **한참 아래** → 그대로 전체 진행
-- 중앙값이 10 **근처거나 위** → `--context repeat`으로 재시도.
-  그래도 높으면 배치 문제다 (`U_HALF_WIDTH`를 좁힌 뒤 노트북에서 재합성)
+- 중앙값이 10 **근처거나 위** → 다른 `--context`로 재시도.
+  양쪽 다 높으면 배치 문제다 (`U_HALF_WIDTH`를 좁혀 노트북에서 재합성)
 
 ```bash
-python3 step2b_nomad_synth_engine.py --context real     # 전체
+# 3) 전체 (466샘플 / 객체 732개)
+python3 step2b_nomad_synth_engine.py \
+  --synth-dir ~/LeLaN_Data_plus/data/synth_dataset \
+  --episodes-dir ~/LeLaN_Data_plus/data/episodes \
+  --context real
 ```
 
-`data/synth_dataset/*.pkl`이 제자리에서 갱신되고 `needs_nomad_traj`가 `False`로 내려간다.
+`--synth-dir`의 `*.pkl` 466개가 제자리에서 갱신되고 `needs_nomad_traj`가 `False`가 된다.
+중단됐으면 `--resume`으로 이어서 돌린다.
 
-### 2-4. GPU 머신: 학습용 패키징
+### 2-4. 패키징 — GPU 불필요, 노트북에서 해도 된다
+
+`synth_package.py`는 PIL과 tqdm만 쓴다. torch도, GPU도 필요 없다.
+그래서 **GPU 머신에서 갱신된 `*.pkl` 466개(1.9MB)만 회수해서 노트북에서 돌리는 것이
+가장 가볍다.**
 
 ```bash
+# GPU 머신 -> 노트북: pkl만 (1.9MB)
+rsync -av <GPU머신>:~/LeLaN_Data_plus/data/synth_dataset/*.pkl data/synth_dataset/
+
+# 노트북에서
 python3 synth_package.py --require-traj
 ```
 
@@ -443,6 +488,9 @@ data_pickle_folder: <절대경로>/data/omnivla_dataset/
 ---
 
 ## 8. GPU 머신에서 할 일
+
+> `step2b`는 `LeLaN_Data` 안에서 실행해야 한다 (NoMaD 코드·체크포인트가 거기 있다).
+> 자세한 절차는 2-3절.
 
 ```bash
 # 1) 컨텍스트 방식 비교 (선택) — min_dist 중앙값이 낮은 쪽을 택한다
