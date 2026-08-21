@@ -11,6 +11,9 @@
 
 ## 1. 빠른 시작
 
+> **다른 머신에서 학습시킬 계획이면 2절부터 읽으면 된다.** 무엇을 옮기고
+> 어디서 무엇을 돌리는지 순서대로 정리해 뒀다.
+
 ```bash
 # 전체 파이프라인 (GPU 없으면 --skip-gpu)
 python3 synth_pipeline.py --all --num 600
@@ -31,7 +34,199 @@ python3 synth_pipeline.py --stage compose,package
 
 ---
 
-## 2. 입력 준비
+## 2. 다른 머신에서 학습하기 — 전체 순서
+
+노트북에서 합성까지 하고, GPU 머신에서 NoMaD와 학습을 돌리는 것을 전제로 한다.
+
+| 머신 | 하는 일 | 필요한 것 |
+|---|---|---|
+| 노트북 (CPU) | 에셋 준비 → 캘리브레이션 → **합성** | 주행 프레임 + depth + 사람 PNG |
+| GPU 머신 | **NoMaD 궤적** → 패키징 → 학습 | 합성 결과 + 주행 프레임(jpg만) |
+
+핵심: **depth는 GPU 머신에 옮길 필요가 없다.** 합성이 끝나면 depth를 쓰는 곳이
+없다(5-1 참조). 그래서 635MB를 통째로 뺄 수 있다.
+
+### 2-1. 노트북: 합성까지
+
+```bash
+python3 synth_pipeline.py --all --skip-gpu --num 600
+```
+
+끝나면 이렇게 나온다:
+
+```
+data/synth_dataset/     466개 샘플, 샘플당 파일 6개
+  ├── manifest.jsonl        샘플 -> 인물 색인
+  └── assets_used.json      인물 -> 샘플 역색인
+```
+
+확인:
+
+```bash
+python3 -c "import json;print(sum(1 for _ in open('data/synth_dataset/manifest.jsonl')))"
+# 466
+```
+
+### 2-2. GPU 머신으로 옮길 것
+
+**약 107MB.** 아래 4개만 옮기면 된다.
+
+| 옮길 것 | 용량 | 왜 필요한가 |
+|---|---|---|
+| 코드 저장소 | 176 KB | `git clone` |
+| `data/synth_dataset/*.jpg` (`_compare.jpg` 제외) | 28 MB | NoMaD의 obs·goal 입력 |
+| `data/synth_dataset/*_gt.json`, `*.pkl`, `manifest.jsonl` | 4 MB | GT pose·bbox, 갱신 대상 pkl |
+| `data/episodes/*/*.jpg` | 75 MB | `--context real`의 직전 프레임 |
+| `data/human_assets.json` | 84 KB | 에셋 ID ↔ H_real 대조 |
+
+**옮기지 않아도 되는 것:**
+
+| 제외 | 용량 | 이유 |
+|---|---|---|
+| `data/episodes/*/metric_depth/` | 635 MB | 합성이 끝나면 depth를 쓰지 않는다 |
+| `data/synth_dataset/*_depth_synth.npy` | 173 MB | 학습에 쓰이지 않는 부산물 |
+| `data/synth_dataset/*_compare.jpg` | 57 MB | 사람 눈 검수용 |
+| `data/synth_dataset/*_mask.png` | 1.9 MB | GT bbox로 충분 |
+| `data/human_cropped/` | 21 MB | 합성이 이미 끝났다 |
+
+rsync 예시 (`--dry-run`으로 규칙을 검증했다):
+
+```bash
+# 코드
+git clone https://github.com/suhyeon5280/human_semantic_data.git
+cd human_semantic_data
+
+# 합성 결과 (검수용·부산물 제외)
+# 주의: rsync는 규칙을 "먼저 맞는 것"으로 적용한다. --exclude='*_compare.jpg'가
+# --include='*.jpg'보다 앞에 와야 한다. 순서를 바꾸면 검수용 57MB가 그대로 따라온다.
+rsync -av --progress \
+  --exclude='*_compare.jpg' \
+  --include='*.jpg' --include='*_gt.json' --include='*.pkl' \
+  --include='manifest.jsonl' --include='assets_used.json' \
+  --exclude='*' \
+  <노트북>:~/LeLaN_Data_plus/data/synth_dataset/ data/synth_dataset/
+
+# 주행 프레임 jpg만 (metric_depth 635MB 제외)
+rsync -av --progress \
+  --exclude='metric_depth/' --include='*/' --include='*.jpg' --exclude='*' \
+  <노트북>:~/LeLaN_Data_plus/data/episodes/ data/episodes/
+
+# 에셋 메타
+rsync -av <노트북>:~/LeLaN_Data_plus/data/human_assets.json data/
+```
+
+전송 후 확인 — 이 숫자가 나와야 한다:
+
+```bash
+ls data/synth_dataset/*.jpg | grep -vc _compare   # 466
+ls data/synth_dataset/*.pkl | wc -l               # 466
+ls data/episodes/*/*.jpg | wc -l                  # 1709
+find data/episodes -name '*.npy' | wc -l          # 0   (안 옮겨도 된다)
+```
+
+> `--context repeat`으로 돌릴 거면 `data/episodes/`도 필요 없다. 다만 권장값은
+> `real`이다 (8절 참조 — 정지로 오인되면 궤적이 전부 탈락한다).
+
+### 2-3. GPU 머신: NoMaD 궤적 채우기
+
+모델 체크포인트가 있어야 한다.
+
+```
+models/nomad.yaml
+models/nomad_vla_checkpoint.pth
+```
+
+SAM 체크포인트는 **필요 없다** (`step2b`는 SAM을 로드하지 않는다).
+
+```bash
+# 먼저 50개로 동작 확인
+python3 step2b_nomad_synth_engine.py --limit 50 --context real
+```
+
+마지막 요약에서 이걸 본다:
+
+```
+min_dist 분포 : median 6.2, p90 11.4, max 18.0  (임계 10.0)
+```
+
+- 중앙값이 10보다 **한참 아래** → 그대로 전체 진행
+- 중앙값이 10 **근처거나 위** → `--context repeat`으로 재시도.
+  그래도 높으면 배치 문제다 (`U_HALF_WIDTH`를 좁힌 뒤 노트북에서 재합성)
+
+```bash
+python3 step2b_nomad_synth_engine.py --context real     # 전체
+```
+
+`data/synth_dataset/*.pkl`이 제자리에서 갱신되고 `needs_nomad_traj`가 `False`로 내려간다.
+
+### 2-4. GPU 머신: 학습용 패키징
+
+```bash
+python3 synth_package.py --require-traj
+```
+
+`--require-traj`는 궤적이 채워진 객체만 남긴다. 결과:
+
+```
+data/omnivla_dataset/<episode>/image/00000000.jpg        224x224
+data/omnivla_dataset/<episode>/pickle_nomad/00000000.pkl
+```
+
+**여기부터 학습에 필요한 건 이 폴더 13MB뿐이다.**
+
+확인:
+
+```bash
+python3 -c "
+import pickle, glob
+fs = glob.glob('data/omnivla_dataset/*/pickle_nomad/*.pkl')
+objs = [o for f in fs for o in pickle.load(open(f,'rb'))]
+print('프레임', len(fs), '객체', len(objs))
+print('궤적 채워진 객체', sum(1 for o in objs if o['nomad_traj_norm'] is not None))
+print('키', sorted(objs[0]))
+"
+```
+
+`궤적 채워진 객체`가 0이면 2-3을 건너뛴 것이다.
+
+### 2-5. 학습 등록
+
+OmniVLA / LeLaN 학습 설정의 `data_config.yaml`에 시퀀스 폴더로 등록한다.
+
+```yaml
+metric_waypoint_spacing: 0.12
+data_image_folder:  /절대경로/data/omnivla_dataset/
+data_pickle_folder: /절대경로/data/omnivla_dataset/
+```
+
+각 `<episode>` 폴더가 `go_stanford2` 스타일 시퀀스 역할을 한다.
+로더는 폴더 안 파일을 0부터 연속 인덱스로 읽고, 현재 인덱스 `iv`에 대해
+`image_path[iv-1]`, `[iv-2]`를 시간적 컨텍스트로 쓴다 — **9절 1번 한계를 반드시
+확인하고 시작할 것.**
+
+### 2-6. 전부 GPU 머신에서 하고 싶다면
+
+노트북 결과를 옮기지 않고 처음부터 다시 돌릴 수도 있다. 이때는 원본 데이터가 필요하다.
+
+```
+data/episodes/…                  주행 프레임 + metric_depth (없으면 step1이 만든다)
+data/human_cropped/…             사람 PNG 194개
+data/human_annotations.jsonl     캡션
+data/human_assets.json           있으면 그대로, 없으면 자동 생성
+```
+
+```bash
+python3 synth_pipeline.py --all --num 600 --seed 2026
+python3 synth_package.py --require-traj
+```
+
+**`--seed`를 노트북과 같게 주면 동일한 데이터셋이 나온다.**
+단 `data/human_assets.json`이 있어야 한다 — 없으면 `H_real`이 새로 뽑혀서
+사람 크기가 달라진다 (11절 참조).
+
+---
+
+## 3. 입력 준비
 
 ```
 data/
@@ -69,7 +264,7 @@ python3 human_annotations.py csv review.csv     # 엑셀로 검수
 
 ---
 
-## 3. 파이프라인 단계
+## 4. 파이프라인 단계
 
 | # | 단계 | 스크립트 | GPU | 비고 |
 |---|---|---|---|---|
@@ -87,7 +282,7 @@ python3 human_annotations.py csv review.csv     # 엑셀로 검수
 depth를 쓰는 곳은 **합성 시 가림(occlusion) 판정 한 군데뿐**이고,
 거기 필요한 건 *원본 프레임*의 depth다. 이미 있다.
 
-- 사람 배치: depth를 안 쓴다 (아래 4-1 참조)
+- 사람 배치: depth를 안 쓴다 (아래 5-1 참조)
 - 3D 위치 GT: 우리가 심었으므로 정확히 안다
 - step2b, 패키징: depth를 안 쓴다
 
@@ -104,9 +299,9 @@ step3는 SAM이 찾은 정체불명 객체에 자연어 라벨을 붙이는 단�
 
 ---
 
-## 4. 기하 — 왜 이렇게 계산하는가
+## 5. 기하 — 왜 이렇게 계산하는가
 
-### 4-1. 배치에 depth를 쓰지 않는다
+### 5-1. 배치에 depth를 쓰지 않는다
 
 depth 맵에서 픽셀을 골라 그 값을 읽는 대신, **거리 `d`를 먼저 뽑고**
 물리 카메라 높이로 발 위치를 역산한다.
@@ -123,7 +318,7 @@ v_foot = horizon_v + fy × 0.561 / d
 
 depth는 가림 판정에만 쓰고, 그때만 `depth_k`로 단위를 맞춘다.
 
-### 4-2. 비등방 리사이즈 (놓치기 쉬움)
+### 5-2. 비등방 리사이즈 (놓치기 쉬움)
 
 FrodoBots-2K는 1024×576을 540×360으로 **비균등** 리사이즈해서 배포한다
 (`scale_x=0.5273`, `scale_y=0.6250`). 그래서 `fx ≠ fy`다.
@@ -139,7 +334,7 @@ h_px = fy * H_real / d
 w_px = h_px * (orig_w / orig_h) * (fx / fy)     # fx/fy = 0.8433
 ```
 
-### 4-3. 카메라 파라미터
+### 5-3. 카메라 파라미터
 
 | 값 | 출처 |
 |---|---|
@@ -151,7 +346,7 @@ w_px = h_px * (orig_w / orig_h) * (fx / fy)     # fx/fy = 0.8433
 전신이 프레임에 완전히 들어오는 최소 거리는 **1.89m**다. 그보다 가까우면 머리가
 잘리므로 `MAX_TOP_CROP = 0.15`로 15%까지 크롭을 허용한다 (1.6m에서 8.6% 잘림).
 
-### 4-4. 거리 샘플링은 역깊이 균등
+### 5-4. 거리 샘플링은 역깊이 균등
 
 `d`에 균등하게 뽑으면 화면상 크기가 `1/d`로 찌그러져 작은(먼) 인물이 과다해진다.
 픽셀 크기가 `1/d`에 비례하므로 **`1/d`에 균등하게** 뽑는다.
@@ -163,7 +358,7 @@ w_px = h_px * (orig_w / orig_h) * (fx / fy)     # fx/fy = 0.8433
 
 ---
 
-## 5. 장면 구성
+## 6. 장면 구성
 
 ### 인원 분포
 
@@ -197,7 +392,7 @@ w_px = h_px * (orig_w / orig_h) * (fx / fy)     # fx/fy = 0.8433
 
 ---
 
-## 6. 출력 형식
+## 7. 출력 형식
 
 ### `data/synth_dataset/` — 검수·재현용
 
@@ -247,7 +442,7 @@ data_pickle_folder: <절대경로>/data/omnivla_dataset/
 
 ---
 
-## 7. GPU 머신에서 할 일
+## 8. GPU 머신에서 할 일
 
 ```bash
 # 1) 컨텍스트 방식 비교 (선택) — min_dist 중앙값이 낮은 쪽을 택한다
@@ -280,7 +475,7 @@ NoMaD의 obs 스택은 `[직전 3프레임 + 현재]`이고, 여기서 **자아�
 
 ---
 
-## 8. 알려진 한계
+## 9. 알려진 한계
 
 1. **컨텍스트 프레임에 다른 사람이 서 있다.** `omnivla_dataset`의 인덱스 `i-1`은
    다른 합성 샘플이라 거기 있는 사람이 현재 프레임의 사람과 다르다.
@@ -310,7 +505,7 @@ NoMaD의 obs 스택은 `[직전 3프레임 + 현재]`이고, 여기서 **자아�
 
 ---
 
-## 9. 조정 손잡이
+## 10. 조정 손잡이
 
 `synth_compose.py` 상단 상수:
 
@@ -330,7 +525,7 @@ NoMaD의 obs 스택은 `[직전 3프레임 + 현재]`이고, 여기서 **자아�
 
 ---
 
-## 10. 재현성
+## 11. 재현성
 
 - `data/human_assets.json`의 `H_real`은 시드 고정으로 **한 번만** 생성된다.
   `--force-assets`로 다시 뽑으면 기존 GT와 어긋나므로 **재합성이 필요하다.**
@@ -340,7 +535,7 @@ NoMaD의 obs 스택은 `[직전 3프레임 + 현재]`이고, 여기서 **자아�
 
 ---
 
-## 11. 파일 목록
+## 12. 파일 목록
 
 | 파일 | 역할 |
 |---|---|

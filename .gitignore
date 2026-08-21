@@ -8,7 +8,7 @@ data/episodes/
 
 # ── 파이프라인 생성물 ──
 # synth_compose.py의 --seed와 data/human_assets.json이 고정이므로 동일하게 재생성된다.
-# (README 10절 재현성 참조)
+# (README 11절 재현성 참조)
 # data/synth_dataset   264MB
 # data/omnivla_dataset  13MB
 # data/synth_preview    초기 검수용, 폐기 가능
